@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Minimal Agent Runtime</title>
+  <style>
+    :root { color-scheme:dark; font-family:Inter,"Microsoft YaHei",sans-serif; background:#0b1020; color:#e8ecf4; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:radial-gradient(circle at top left,#172554,#0b1020 42%); }
+    .layout { display:grid; grid-template-columns:280px 1fr; min-height:100vh; }
+    aside { padding:24px; border-right:1px solid #28334d; background:#0d1426cc; backdrop-filter:blur(18px); }
+    h1 { font-size:20px; margin:0 0 8px; }
+    .hint { color:#91a0bd; font-size:13px; line-height:1.5; }
+    button { border:0; border-radius:10px; padding:10px 14px; color:white; background:#315cf5; cursor:pointer; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    #newSession { width:100%; margin:18px 0; }
+    .session { width:100%; text-align:left; margin:5px 0; background:#141e34; color:#cbd5e1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .session.active { background:#27448d; color:white; }
+    main { display:flex; flex-direction:column; max-height:100vh; }
+    header { padding:24px 32px 14px; border-bottom:1px solid #28334d; }
+    #status { color:#8fa2c8; font-size:13px; }
+    #messages { flex:1; overflow:auto; padding:28px 8%; }
+    .msg { max-width:780px; margin:0 auto 18px; padding:14px 18px; border-radius:15px; line-height:1.65; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .user { background:#27448d; margin-right:0; }
+    .assistant { background:#151f35; border:1px solid #2b3a5b; margin-left:0; }
+    .tool { background:#18251f; color:#9fd7b5; font-family:ui-monospace,monospace; font-size:12px; }
+    .composer { display:flex; gap:12px; padding:18px 8% 26px; border-top:1px solid #28334d; background:#0b1020cc; }
+    textarea { flex:1; resize:none; min-height:54px; max-height:160px; border:1px solid #34415f; border-radius:12px; padding:14px; background:#111a2d; color:white; font:inherit; }
+    #send { align-self:stretch; min-width:90px; }
+    @media (max-width:720px) { .layout{grid-template-columns:1fr} aside{display:none} #messages,.composer{padding-left:18px;padding-right:18px} }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside>
+    <h1>Agent Runtime</h1>
+    <div class="hint">独立 Session · 工具调用 · Context 管理</div>
+    <button id="newSession">＋ 新建会话</button>
+    <div id="sessions"></div>
+  </aside>
+  <main>
+    <header><strong id="title">请选择或新建会话</strong><br><span id="status">Mock 模式可直接体验</span></header>
+    <section id="messages"></section>
+    <div class="composer">
+      <textarea id="input" placeholder="例如：计算 12*(3+4)、搜索 Agent Runtime、添加待办 写周报"></textarea>
+      <button id="send">发送</button>
+    </div>
+  </main>
+</div>
+<script>
+  let activeSession = null;
+  const el = id => document.getElementById(id);
+  async function api(path, options={}) {
+    const response = await fetch(path, {headers:{"Content-Type":"application/json"}, ...options});
+    if (!response.ok) throw new Error((await response.json()).detail || response.statusText);
+    return response.json();
+  }
+  function renderMessage(message) {
+    const node = document.createElement("div");
+    node.className = "msg " + message.role;
+    if (message.role === "tool") {
+      let text = message.content;
+      try { text = JSON.stringify(JSON.parse(text), null, 2); } catch (_) {}
+      node.textContent = (message.name || "tool") + "\n" + text;
+    } else node.textContent = message.content;
+    el("messages").appendChild(node);
+  }
+  async function loadSessions() {
+    const sessions = await api("/api/sessions");
+    el("sessions").replaceChildren();
+    sessions.forEach(session => {
+      const button = document.createElement("button");
+      button.className = "session" + (session.id === activeSession ? " active" : "");
+      button.textContent = session.title || ("会话 " + session.id.slice(0,8));
+      button.onclick = () => selectSession(session.id, button.textContent);
+      el("sessions").appendChild(button);
+    });
+  }
+  async function selectSession(id, title) {
+    activeSession = id;
+    el("title").textContent = title;
+    el("messages").replaceChildren();
+    (await api("/api/sessions/" + id + "/messages")).forEach(renderMessage);
+    el("messages").scrollTop = el("messages").scrollHeight;
+    await loadSessions();
+  }
+  async function newSession() {
+    const session = await api("/api/sessions", {method:"POST", body:JSON.stringify({title:"会话 " + new Date().toLocaleTimeString()})});
+    await loadSessions();
+    await selectSession(session.id, session.title);
+  }
+  async function send() {
+    const content = el("input").value.trim();
+    if (!content || !activeSession) return;
+    el("input").value = "";
+    renderMessage({role:"user", content:content});
+    el("send").disabled = true;
+    el("status").textContent = "Agent 正在执行…";
+    try {
+      const result = await api("/api/sessions/" + activeSession + "/messages", {method:"POST", body:JSON.stringify({content:content})});
+      await selectSession(activeSession, el("title").textContent);
+      el("status").textContent = "完成 · " + result.steps + " 步 · trace " + result.trace_id.slice(0,8);
+    } catch (error) {
+      renderMessage({role:"assistant", content:"请求失败：" + error.message});
+      el("status").textContent = "执行失败";
+    } finally { el("send").disabled = false; el("input").focus(); }
+  }
+  el("newSession").onclick = newSession;
+  el("send").onclick = send;
+  el("input").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); } });
+  loadSessions()
+    .then(async () => {
+      const sessions = await api("/api/sessions");
+      if (sessions.length) {
+        await selectSession(
+          sessions[0].id,
+          sessions[0].title || ("会话 " + sessions[0].id.slice(0,8))
+        );
+      } else {
+        await newSession();
+      }
+    })
+    .catch(error => {
+      el("status").textContent = "初始化失败：" + error.message;
+    });
+</script>
+</body>
+</html>
