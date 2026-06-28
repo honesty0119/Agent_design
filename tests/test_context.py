@@ -11,8 +11,12 @@ def test_context_compresses_old_messages(tmp_path):
         store.add_message(session["id"], "user", f"user fact {index} " + "x" * 100)
         store.add_message(session["id"], "assistant", f"answer {index} " + "y" * 100)
     builder = ContextBuilder(store, "system", max_context_chars=1600, recent_messages=4)
-    context = builder.build(session["id"])
+    context, stats = builder.build_with_stats(session["id"])
     assert context[0]["role"] == "system"
     assert "history summary" in context[1]["content"]
     assert "user fact" in context[1]["content"]
-    assert len(str(context)) < 2400
+    assert stats["compressed"] is True
+    assert stats["summary_included"] is True
+    assert stats["original_chars"] > 1600
+    assert stats["final_chars"] <= 1600
+    assert stats["recent_messages_configured"] == 4

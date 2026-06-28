@@ -6,7 +6,13 @@ from app.database import SessionStore
 from app.llm.mock import MockLLMClient
 from app.llm.openai_compatible import OpenAICompatibleClient
 from app.runtime import AgentRuntime
-from app.tools import CalculatorTool, MockSearchTool, TodoTool, ToolRegistry
+from app.tools import (
+    CalculatorTool,
+    ContextStatsTool,
+    LocalProjectSearchTool,
+    TodoTool,
+    ToolRegistry,
+)
 
 
 def build_runtime(settings: Settings) -> AgentRuntime:
@@ -14,8 +20,9 @@ def build_runtime(settings: Settings) -> AgentRuntime:
     store = SessionStore(settings.database_path)
     tools = ToolRegistry()
     tools.register(CalculatorTool())
-    tools.register(MockSearchTool())
+    tools.register(LocalProjectSearchTool())
     tools.register(TodoTool())
+    tools.register(ContextStatsTool())
     if settings.llm_mode == "mock":
         llm = MockLLMClient()
     elif settings.llm_mode in {"openai", "openai-compatible"}:
@@ -27,6 +34,7 @@ def build_runtime(settings: Settings) -> AgentRuntime:
         settings.system_prompt,
         max_context_chars=settings.max_context_chars,
         recent_messages=settings.recent_messages,
+        timezone_name=settings.timezone_name,
     )
     return AgentRuntime(
         store, llm, tools, context_builder,

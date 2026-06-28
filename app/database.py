@@ -101,6 +101,33 @@ class SessionStore:
             rows = connection.execute("SELECT * FROM sessions ORDER BY updated_at DESC").fetchall()
         return [dict(row) for row in rows]
 
+    def rename_session(
+        self, session_id: str, title: str
+    ) -> dict[str, Any]:
+        clean_title = title.strip()
+        if not clean_title:
+            raise ValueError("session title cannot be empty")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE sessions
+                SET title = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (clean_title, utc_now(), session_id),
+            )
+        if cursor.rowcount == 0:
+            raise KeyError(f"session not found: {session_id}")
+        return self.get_session(session_id)
+
+    def delete_session(self, session_id: str) -> None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM sessions WHERE id = ?", (session_id,)
+            )
+        if cursor.rowcount == 0:
+            raise KeyError(f"session not found: {session_id}")
+
     def set_session_status(self, session_id: str, status: str) -> None:
         with self._connect() as connection:
             cursor = connection.execute(

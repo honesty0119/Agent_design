@@ -44,6 +44,10 @@ class CreateSessionRequest(BaseModel):
     title: str | None = Field(default=None, max_length=100)
 
 
+class RenameSessionRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=100)
+
+
 class ChatRequest(BaseModel):
     content: str = Field(min_length=1, max_length=20_000)
 

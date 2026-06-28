@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from app.config import Settings
 from app.factory import build_runtime
-from app.models import ChatRequest, ChatResponse, CreateSessionRequest
+from app.models import (
+    ChatRequest,
+    ChatResponse,
+    CreateSessionRequest,
+    RenameSessionRequest,
+)
 from app.runtime import AgentRuntime
 
 
@@ -53,6 +59,25 @@ def create_app(settings: Settings | None = None, runtime: AgentRuntime | None = 
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.patch("/api/sessions/{session_id}")
+    async def rename_session(
+        session_id: str, body: RenameSessionRequest
+    ) -> dict:
+        try:
+            return runtime.store.rename_session(session_id, body.title)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/api/sessions/{session_id}", status_code=204)
+    async def delete_session(session_id: str) -> Response:
+        try:
+            runtime.store.delete_session(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return Response(status_code=204)
+
     @app.get("/api/sessions/{session_id}/messages")
     async def list_messages(session_id: str) -> list[dict]:
         try:
@@ -69,6 +94,32 @@ def create_app(settings: Settings | None = None, runtime: AgentRuntime | None = 
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return ChatResponse(session_id=result.session_id, answer=result.answer, steps=result.steps, trace_id=result.trace_id)
+
+    @app.post("/api/sessions/{session_id}/messages/stream")
+    async def chat_stream(
+        session_id: str, body: ChatRequest
+    ) -> StreamingResponse:
+        try:
+            runtime.store.get_session(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        async def events():
+            async for event in runtime.chat_stream(
+                session_id, body.content
+            ):
+                yield json.dumps(
+                    event, ensure_ascii=False
+                ) + "\n"
+
+        return StreamingResponse(
+            events(),
+            media_type="application/x-ndjson",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.get("/api/sessions/{session_id}/traces")
     async def list_traces(session_id: str, limit: int = Query(default=200, ge=1, le=1000)) -> list[dict]:

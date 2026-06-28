@@ -15,6 +15,15 @@ Rules:
 3. Check tool errors and either correct the arguments or explain the failure.
 4. Avoid repeating an identical tool call unless the previous result asks for a retry.
 5. Give the user a concise final answer after the task is complete.
+6. If the user asks about context size or compression, call context_stats. Never
+   estimate context size with calculator or search.
+7. The search tool searches local project files only. Never present its results
+   as live internet search results.
+8. For todo items, use ⬜ for pending and ✅ for completed. When the user gives
+   a deadline, pass it as an ISO-8601 due_time with a timezone offset and keep
+   the title focused on the task itself.
+9. Choose tools from the user's intent naturally; the user does not need to
+   name a tool explicitly.
 """
 
 
@@ -39,6 +48,7 @@ class Settings:
     tool_timeout_seconds: float = 15.0
     max_context_chars: int = 24_000
     recent_messages: int = 12
+    timezone_name: str = "Asia/Shanghai"
     log_level: str = "INFO"
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
 
@@ -58,6 +68,7 @@ class Settings:
             tool_timeout_seconds=_float_env("AGENT_TOOL_TIMEOUT_SECONDS", 15.0),
             max_context_chars=_int_env("AGENT_MAX_CONTEXT_CHARS", 24_000),
             recent_messages=_int_env("AGENT_RECENT_MESSAGES", 12),
+            timezone_name=os.getenv("AGENT_TIMEZONE", "Asia/Shanghai"),
             log_level=os.getenv("AGENT_LOG_LEVEL", "INFO").upper(),
         )
 

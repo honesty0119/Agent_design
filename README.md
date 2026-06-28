@@ -8,14 +8,16 @@
 
 - 自行实现 Agent Runtime 主循环，最多执行轮数可配置
 - OpenAI-compatible Chat Completions / Tool Calling 适配器
-- Calculator、Mock Search、Todo 三个 Schema 工具
+- 真实模型增量流式输出，支持流式 Tool Calling 参数组装
+- Calculator、本地项目检索、Todo、Context Stats 四个 Schema 工具
 - 工具注册、参数边界校验、超时和结构化错误
 - 多 Session 隔离，同一 Session 内请求串行执行
 - SQLite 保存会话、消息、Todo 和 Trace
 - 长 Context 的“历史摘要 + 最近消息”压缩策略
 - 重复工具调用检测，避免无限循环
 - 模型网络错误重试和安全错误响应
-- Web 对话界面、REST API、Swagger 文档
+- ChatGPT 风格 Web 界面、会话行内重命名与删除
+- REST API、Swagger 文档
 - 覆盖工具、安全限制、Session 隔离、Context 压缩和循环保护的测试
 
 ## 系统结构
@@ -48,7 +50,8 @@
 4. Runtime 校验重复调用并将工具请求写入消息历史。
 5. Tool Registry 在超时约束内执行工具，返回统一的 ToolResult。
 6. 工具结果作为 tool 消息回填 Context，继续请求 LLM。
-7. 得到最终回答，或达到最大轮次后安全终止。
+7. 模型文本增量通过 NDJSON 推送到网页，直接追加到当前消息区。
+8. 得到最终回答，或达到最大轮次后安全终止。
 
 ## 目录说明
 
@@ -68,7 +71,7 @@ app/
 ├── tools/
 │   ├── base.py               # Tool 接口与执行上下文
 │   ├── registry.py           # 注册、路由、超时与异常边界
-│   └── builtin.py            # Calculator/Search/Todo
+│   └── builtin.py            # Calculator/Search/Todo/ContextStats
 └── static/index.html         # 多会话网页
 
 tests/                        # 自动化测试
@@ -86,7 +89,7 @@ Windows PowerShell：
 
 ```powershell
 python -m venv .venv
-..venvScriptsActivate.ps1
+.\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev]"
 Copy-Item .env.example .env
 ```
@@ -114,11 +117,12 @@ python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 Mock 模式可以尝试：
 
-- `计算 12*(3+4)`
-- `搜索 Agent Runtime`
-- `添加待办 写周报`
-- `列出待办`
-- `完成 1`
+- `12*(3+4) 等于多少？`
+- `帮我在项目文件中查找 ContextBuilder`
+- `帮我记下明天上午九点写周报`
+- `列出我的待办`
+- `把 1 号待办标记为完成`
+- `当前 Context 是否触发了压缩？`
 
 ## 使用真实 LLM API
 
@@ -155,12 +159,50 @@ curl -X POST http://127.0.0.1:8000/api/sessions/SESSION_ID/messages \
   -d '{"content":"计算 23*17"}'
 ```
 
+流式发送消息：
+
+```text
+POST /api/sessions/{session_id}/messages/stream
+Content-Type: application/json
+
+{"content":"帮我计算 23*17"}
+```
+
+流式接口返回逐行 NDJSON 事件：
+
+```text
+start → tool_call → tool_result
+→ assistant_delta ... → done
+```
+
 查看消息与 Trace：
 
 ```text
 GET /api/sessions/{session_id}/messages
 GET /api/sessions/{session_id}/traces
 ```
+
+重命名与删除会话：
+
+```text
+PATCH  /api/sessions/{session_id}  body: {"title": "新的名称"}
+DELETE /api/sessions/{session_id}
+```
+
+重命名只更新会话名称和最后更新时间，不会改变 `created_at`。删除会话时，
+SQLite 外键会级联删除该会话的消息、待办和 Trace。
+
+## Web 界面
+
+- 深色中性布局，侧栏与消息区参考 ChatGPT 的信息层级。
+- 左侧每个会话独立显示名称和创建时间。
+- 点击铅笔按钮可行内重命名，按 Enter 或点击外部保存，Esc 取消。
+- 点击删除按钮后必须通过确认弹窗，避免误删。
+- 工具执行结果默认折叠为“工具调用”卡片，可按需展开查看 JSON。
+- 回答使用真实 LLM streaming API 增量追加，不等待完整答案一次性展示。
+- 每轮发送后只更新当前消息和左侧会话顺序，不重新加载整个聊天页面。
+- 输入框提示语为“有问题，尽管问”，支持 Enter 发送、Shift+Enter 换行。
+- 移动端可通过顶部菜单按钮打开会话侧栏。
 
 ## Context 管理
 
@@ -170,8 +212,13 @@ Context Builder 并不把数据库中的全部历史无限塞给模型：
 - 超过限制后，将较早的用户事实、助手结论和关键工具结果压缩为结构化摘要。
 - 最近 `AGENT_RECENT_MESSAGES` 条消息尽量原样保留。
 - 裁剪后删除开头孤立的 tool 消息，避免模型 API 拒绝非法消息序列。
+- 每次构建都会写入 `context_built` Trace，记录原始字符数、最终字符数、压缩状态、摘要来源消息数和保留的最近消息数。
 
 当前摘要器是确定性的抽取式实现，便于测试且不增加模型调用成本。生产环境可替换为独立的小模型摘要器，但应保留结构化摘要契约，并重点保留：用户约束、已确认事实、已完成任务、待处理任务和关键工具结果。
+
+当用户询问 Context 长度或压缩状态时，LLM 应调用只读的
+`context_stats` 工具；System Prompt 明确禁止使用 Calculator 或 Search
+猜测这些内部数据。
 
 ## Session 与并发策略
 
@@ -205,15 +252,27 @@ LLM 只看到名称、描述和 JSON Schema。Tool Registry 负责：
 
 新增工具时，在 `app/tools/builtin.py` 中实现 Tool，并在 `app/factory.py` 注册即可。
 
+当前内置工具：
+
+- `calculator`：AST 白名单算术计算。
+- `search`：实际扫描本地项目的 Markdown、Python、TOML、HTML 和 JSON 文件；不回退到无关固定结果，也不声称是互联网搜索。
+- `todo`：按 Session 新增、列出和完成待办；截止时间必须是带时区偏移的 ISO-8601 时间。
+- `context_stats`：只读返回本轮 Context 的真实构建统计。
+
 ### 安全说明
 
 Calculator 使用 Python AST 白名单，只允许数字、括号和基础运算符，不使用 `eval`。同时限制表达式长度、AST 深度、数值大小和指数，避免代码执行与明显的资源滥用。
+
+Todo 返回明确的 `pending` / `completed` 状态。System Prompt 约定
+待处理使用 `⬜`，已完成使用 `✅`；当用户表达相对时间时，Runtime 会向
+模型提供配置时区下的当前时间，模型再生成带时区的 `due_time`。
 
 ## 可观测性
 
 每次用户请求生成 `trace_id`，数据库记录：
 
 - 用户消息长度
+- Context 是否压缩、压缩前后字符数、摘要来源和最近消息保留数
 - 每一步 LLM 决策及耗时
 - Token usage（提供商返回时）
 - 工具名称、耗时、成功状态、是否可重试
@@ -230,7 +289,11 @@ python -m pytest
 测试内容包括：
 
 - 合法计算与代码执行阻断
+- 本地项目检索只返回真实匹配
+- Todo 截止时间的时区校验
+- Context Stats 工具返回真实测量数据
 - LLM → Tool → LLM 完整循环
+- 流式 Tool Calling、工具结果和最终回答事件顺序
 - 两个 Session 的数据隔离
 - 重复工具调用保护
 - 最大执行轮数保护
@@ -251,6 +314,7 @@ python -m pytest
 | `AGENT_TOOL_TIMEOUT_SECONDS` | `15` | 单次工具超时 |
 | `AGENT_MAX_CONTEXT_CHARS` | `24000` | MVP Context 大小近似阈值 |
 | `AGENT_RECENT_MESSAGES` | `12` | 压缩时保留的最近消息数 |
+| `AGENT_TIMEZONE` | `Asia/Shanghai` | 解析相对 Todo 截止时间时使用的时区 |
 
 字符数只是无 tokenizer 依赖下的保守近似。生产环境应接入具体模型 tokenizer，并分别预留输出 Token 和工具 Schema 的预算。
 
@@ -258,7 +322,7 @@ python -m pytest
 
 这是刻意保持清晰的小型 Runtime，暂未实现：
 
-- 真正的网络搜索服务
+- 互联网搜索服务（当前 Search 是真实的本地项目检索）
 - 多工具并行调用
 - 跨 Session 的长期用户 Memory
 - 多进程分布式锁
@@ -270,7 +334,7 @@ python -m pytest
 1. 给消息增加 turn/version，支持异步工具完成事件。
 2. 引入 Session Mailbox，统一处理用户消息和工具事件。
 3. 增加后台任务表、Worker、取消与幂等机制。
-4. 接入真实搜索和文档检索，并增加权限/审计层。
+4. 接入联网搜索，并增加权限、来源引用和审计层。
 5. 将 Trace 导出到 OpenTelemetry。
 6. 增加长期 Memory 的写入判断、检索、衰减和用户可控删除。
 

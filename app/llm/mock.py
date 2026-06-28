@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
+from collections.abc import AsyncIterator
 from typing import Any
 
 from app.models import LLMDecision, ToolCall
@@ -22,6 +24,12 @@ class MockLLMClient:
         if arithmetic and arithmetic.group(1).strip():
             return self._tool("calculator", {"expression": arithmetic.group(1).strip()})
 
+        if (
+            any(word in lowered for word in ["context", "上下文"])
+            and any(word in lowered for word in ["长度", "大小", "压缩", "统计"])
+        ):
+            return self._tool("context_stats", {})
+
         if any(word in lowered for word in ["搜索", "查询资料", "search"]):
             query = re.sub(r"^(请)?(搜索|查询资料|search)\s*[:：]?", "", user_text, flags=re.I).strip() or user_text
             return self._tool("search", {"query": query, "limit": 3})
@@ -40,6 +48,21 @@ class MockLLMClient:
             kind="final",
             content=f"Mock 模式已收到：{user_text}\n\n可尝试：计算 12*(3+4)、搜索 Agent Runtime、添加待办 写周报。",
         )
+
+    async def stream_complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> AsyncIterator[dict[str, Any]]:
+        decision = await self.complete(messages, tools)
+        if decision.kind == "final":
+            for index in range(0, len(decision.content), 4):
+                await asyncio.sleep(0)
+                yield {
+                    "type": "content",
+                    "content": decision.content[index : index + 4],
+                }
+        yield {"type": "decision", "decision": decision}
 
     @staticmethod
     def _latest_user(messages: list[dict[str, Any]]) -> str:
@@ -68,16 +91,43 @@ class MockLLMClient:
         if name == "calculator":
             return LLMDecision(kind="final", content=f"计算结果：{data.get('result')}")
         if name == "search":
-            lines = [f"- {item['title']}：{item['content']}" for item in data.get("results", [])]
-            return LLMDecision(kind="final", content="搜索结果（Mock 数据）：\n" + "\n".join(lines))
+            results = data.get("results", [])
+            if not results:
+                return LLMDecision(
+                    kind="final",
+                    content="本地项目文件中没有找到匹配内容。",
+                )
+            lines = [
+                f"- {item['source']}：{item['snippet']}"
+                for item in results
+            ]
+            return LLMDecision(
+                kind="final",
+                content="本地项目检索结果：\n" + "\n".join(lines),
+            )
         if name == "todo":
             if "todos" in data:
                 todos = data["todos"]
                 if not todos:
                     return LLMDecision(kind="final", content="当前没有待办事项。")
-                lines = [f"- #{item['id']} [{'x' if item['completed'] else ' '}] {item['title']}" for item in todos]
+                lines = [
+                    f"- #{item['id']} "
+                    f"{'✅' if item['completed'] else '⬜'} "
+                    f"{item['title']}"
+                    for item in todos
+                ]
                 return LLMDecision(kind="final", content="当前待办：\n" + "\n".join(lines))
             todo = data.get("todo", {})
             state = "已完成" if todo.get("completed") else "已添加"
             return LLMDecision(kind="final", content=f"待办{state}：#{todo.get('id')} {todo.get('title')}")
+        if name == "context_stats":
+            return LLMDecision(
+                kind="final",
+                content=(
+                    "Context 统计："
+                    f"原始 {data.get('original_chars')} 字符，"
+                    f"最终 {data.get('final_chars')} 字符，"
+                    f"已压缩：{data.get('compressed')}。"
+                ),
+            )
         return LLMDecision(kind="final", content=json.dumps(data, ensure_ascii=False))

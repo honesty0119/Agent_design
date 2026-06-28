@@ -13,6 +13,7 @@ class ToolContext:
     session_id: str
     trace_id: str
     store: SessionStore
+    context_stats: dict[str, Any] | None = None
 
 
 class Tool(ABC):
